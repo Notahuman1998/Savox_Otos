@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Savox Acoustician Interface</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #f3f4f6; }
+        .drop-zone { border: 2px dashed #cbd5e1; transition: all 0.3s ease; }
+        .drop-zone.dragover { border-color: #3b82f6; background-color: #eff6ff; }
+    </style>
+</head>
+<body class="h-screen flex flex-col items-center justify-center p-6">
+
+    <div class="bg-white shadow-xl rounded-2xl w-full max-w-4xl overflow-hidden flex flex-col md:flex-row h-[80vh]">
+        
+        <!-- Sidebar / Controls -->
+        <div class="w-full md:w-1/3 bg-slate-50 p-6 flex flex-col border-r border-slate-200">
+            <h1 class="text-xl font-bold text-slate-800 mb-1">Patient Encoder</h1>
+            <p class="text-xs text-slate-500 mb-6">Savox Hearing Systems v1.0</p>
+
+            <!-- File Upload -->
+            <div id="dropZone" class="drop-zone rounded-lg p-8 flex flex-col items-center justify-center text-center cursor-pointer mb-6 flex-grow">
+                <svg class="w-10 h-10 text-slate-400 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path></svg>
+                <p class="text-sm text-slate-600 font-medium">Drop XML File Here</p>
+                <p class="text-xs text-slate-400 mt-1">or click to browse</p>
+                <input type="file" id="fileInput" class="hidden" accept=".xml">
+            </div>
+
+            <!-- Patient Info (Hidden until loaded) -->
+            <div id="patientInfo" class="hidden mb-6 bg-white p-4 rounded border border-slate-100 shadow-sm">
+                <h3 class="font-bold text-slate-700" id="pName">--</h3>
+                <p class="text-xs text-slate-500">ID: <span id="pId">--</span></p>
+                <div class="mt-2 flex gap-2">
+                    <span class="px-2 py-1 bg-green-100 text-green-700 text-xs rounded-full">Audiogram Ready</span>
+                </div>
+            </div>
+
+            <!-- Action Buttons -->
+            <div class="mt-auto space-y-3">
+                <button id="btnConnect" class="w-full py-3 px-4 bg-slate-800 hover:bg-slate-700 text-white rounded-lg font-medium transition flex items-center justify-center gap-2">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+                    Connect Writer
+                </button>
+                <button id="btnWrite" disabled class="w-full py-3 px-4 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-300 disabled:cursor-not-allowed text-white rounded-lg font-medium transition shadow-lg shadow-blue-500/30">
+                    Write to Card
+                </button>
+            </div>
+            
+            <p id="statusMsg" class="text-xs text-center mt-4 text-slate-400 h-4">Waiting for input...</p>
+        </div>
+
+        <!-- Visualization Area -->
+        <div class="w-full md:w-2/3 p-6 bg-white relative">
+            <h2 class="text-sm font-bold text-slate-400 uppercase tracking-wide mb-4">Audiogram Visualization</h2>
+            <div class="relative h-[60vh] w-full">
+                <canvas id="audiogramChart"></canvas>
+            </div>
+            <!-- Overlay for Empty State -->
+            <div id="emptyState" class="absolute inset-0 bg-white/80 flex items-center justify-center">
+                <p class="text-slate-400">Load patient data to view audiogram</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- Logic: XML Parsing & Serial Comm ---
+
+        let port;
+        let writer;
+        let patientData = null; // Stores the parsed bytes
+
+        // Frequencies expected by the system (must match Arduino order)
+        const TARGET_FREQS = [125, 250, 500, 750, 1000, 1500, 2000, 3000, 4000, 6000, 8000];
+
+        // 1. File Handling
+        const dropZone = document.getElementById('dropZone');
+        const fileInput = document.getElementById('fileInput');
+
+        dropZone.addEventListener('click', () => fileInput.click());
+        dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
+        dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropZone.classList.remove('dragover');
+            handleFile(e.dataTransfer.files[0]);
+        });
+        fileInput.addEventListener('change', (e) => handleFile(e.target.files[0]));
+
+        function handleFile(file) {
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = (e) => parseXML(e.target.result);
+            reader.readAsText(file);
+        }
+
+        function parseXML(xmlString) {
+            const parser = new DOMParser();
+            const xmlDoc = parser.parseFromString(xmlString, "text/xml");
+
+            // Extract Patient Info
+            const fname = xmlDoc.querySelector("FirstName")?.textContent || "Unknown";
+            const lname = xmlDoc.querySelector("LastName")?.textContent || "";
+            const pid = xmlDoc.querySelector("Id")?.textContent || "---";
+
+            document.getElementById('pName').textContent = `${fname} ${lname}`;
+            document.getElementById('pId').textContent = pid;
+            document.getElementById('patientInfo').classList.remove('hidden');
+            document.getElementById('emptyState').classList.add('hidden');
+
+            // Extract Audiogram Data
+            const audiograms = xmlDoc.getElementsByTagName("ToneThresholdAudiogram");
+            
+            let leftData = new Array(TARGET_FREQS.length).fill(0); // Default to 0dB if missing
+            let rightData = new Array(TARGET_FREQS.length).fill(0);
+
+            // Helper to find data in XML
+            const extractCurve = (gram) => {
+                const points = gram.getElementsByTagName("TonePoints");
+                let curve = {};
+                for (let point of points) {
+                    const freq = parseInt(point.querySelector("StimulusFrequency")?.textContent);
+                    const level = parseInt(point.querySelector("StimulusLevel")?.textContent);
+                    if (!isNaN(freq)) curve[freq] = level;
+                }
+                return curve;
+            };
+
+            for (let gram of audiograms) {
+                const output = gram.querySelector("StimulusSignalOutput")?.textContent;
+                const curve = extractCurve(gram);
+                
+                // Map extracted curve to our fixed target frequencies
+                const mappedData = TARGET_FREQS.map(f => curve[f] !== undefined ? curve[f] : 0);
+
+                if (output === "AirConductorLeft") leftData = mappedData;
+                if (output === "AirConductorRight") rightData = mappedData;
+            }
+
+            updateChart(leftData, rightData);
+            preparePacket(leftData, rightData);
+            
+            document.getElementById('statusMsg').textContent = "Data Ready. Connect Writer to proceed.";
+        }
+
+        // 2. Data Preparation (Serialization)
+        function preparePacket(left, right) {
+            // We need a flat array of bytes. 
+            // Since thresholds can be negative (-10dB), we use signed integers or mapped values.
+            // For simplicity here, we send them as raw bytes (Two's complement handled by JS TypedArrays).
+            
+            const buffer = new Int8Array(left.length + right.length);
+            buffer.set(left, 0);
+            buffer.set(right, left.length);
+            
+            patientData = buffer;
+            checkReady();
+        }
+
+        // 3. Chart Visualization
+        let chart;
+        function updateChart(left, right) {
+            const ctx = document.getElementById('audiogramChart').getContext('2d');
+            
+            if (chart) chart.destroy();
+
+            chart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: TARGET_FREQS,
+                    datasets: [
+                        {
+                            label: 'Left Ear (X)',
+                            data: left,
+                            borderColor: '#3b82f6', // Blue
+                            pointStyle: 'crossRot',
+                            pointRadius: 6,
+                            borderWidth: 2,
+                            tension: 0.1
+                        },
+                        {
+                            label: 'Right Ear (O)',
+                            data: right,
+                            borderColor: '#ef4444', // Red
+                            pointStyle: 'circle',
+                            pointRadius: 6,
+                            borderWidth: 2,
+                            tension: 0.1
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: {
+                            reverse: true, // Audiograms go down!
+                            min: -10,
+                            max: 120,
+                            title: { display: true, text: 'Hearing Level (dB HL)' }
+                        },
+                        x: {
+                            title: { display: true, text: 'Frequency (Hz)' }
+                        }
+                    }
+                }
+            });
+        }
+
+        // 4. Web Serial Logic
+        const btnConnect = document.getElementById('btnConnect');
+        const btnWrite = document.getElementById('btnWrite');
+        const statusMsg = document.getElementById('statusMsg');
+
+        btnConnect.addEventListener('click', async () => {
+            if ("serial" in navigator) {
+                try {
+                    port = await navigator.serial.requestPort();
+                    await port.open({ baudRate: 115200 });
+                    
+                    writer = port.writable.getWriter();
+                    
+                    btnConnect.textContent = "Hardware Connected";
+                    btnConnect.classList.remove('bg-slate-800');
+                    btnConnect.classList.add('bg-green-600');
+                    statusMsg.textContent = "Writer Connected. Ready to Encode.";
+                    checkReady();
+                } catch (err) {
+                    console.error(err);
+                    statusMsg.textContent = "Connection Failed: " + err.message;
+                }
+            } else {
+                alert("Your browser does not support Web Serial. Use Chrome or Edge.");
+            }
+        });
+
+        btnWrite.addEventListener('click', async () => {
+            if (!writer || !patientData) return;
+
+            statusMsg.textContent = "Writing to card... DO NOT REMOVE.";
+            
+            try {
+                // Protocol: Send 'W' then the 22 bytes
+                const encoder = new TextEncoder();
+                const startCmd = encoder.encode('W');
+                
+                await writer.write(startCmd);
+                await writer.write(patientData);
+                
+                statusMsg.textContent = "Success! Data encoded to NFC.";
+                alert("Card written successfully!");
+            } catch (err) {
+                statusMsg.textContent = "Write Error: " + err.message;
+            }
+        });
+
+        function checkReady() {
+            if (writer && patientData) {
+                btnWrite.disabled = false;
+            }
+        }
+
+    </script>
+</body>
+</html>
