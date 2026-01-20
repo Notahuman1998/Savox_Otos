@@ -1,0 +1,164 @@
+#include <Wire.h>
+#include <SPI.h>
+#include <Adafruit_PN532.h>
+#include <U8g2lib.h>
+
+// --- DISPLAY CONFIGURATION (VMA438 / SSD1306) ---
+// *** MEMORY FIX ***
+// Changed from _F_ (Full Framebuffer, 1024 bytes RAM) to _1_ (Page Buffer, 128 bytes RAM)
+// This saves ~900 bytes of RAM, preventing the overflow error on Nano.
+U8G2_SSD1306_128X64_NONAME_1_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
+
+// --- HARDWARE CONFIGURATION ---
+#define PN532_IRQ   2
+#define PN532_RESET 3
+#define BUZZER_PIN  A2
+#define STATUS_LED  13
+
+Adafruit_PN532 nfc(PN532_IRQ, PN532_RESET);
+
+// --- FAKE DATA GENERATOR ---
+const int PACKET_SIZE = 22; 
+uint8_t dummyData[PACKET_SIZE] = {
+  10, 15, 20, 25, 30, 40, 60, 50, 40, 20, 100, // Left Ear
+  5,  5,  10, 15, 20, 25, 30, 25, 20, 15, 100  // Right Ear
+};
+
+// --- I2C RECOVERY ---
+void recoverI2C() {
+  Wire.end(); delay(10);
+  pinMode(A4, OUTPUT); pinMode(A5, OUTPUT);
+  digitalWrite(A4, HIGH);
+  for (int i = 0; i < 9; i++) {
+    digitalWrite(A5, HIGH); delayMicroseconds(10);
+    digitalWrite(A5, LOW); delayMicroseconds(10);
+  }
+  digitalWrite(A4, LOW); digitalWrite(A5, HIGH); delayMicroseconds(10);
+  digitalWrite(A4, HIGH); delayMicroseconds(10);
+  pinMode(A4, INPUT); pinMode(A5, INPUT); delay(100);
+}
+
+// Helper: Standard screen update with low memory usage
+void updateScreen(const char* line1, const char* line2 = "") {
+  u8g2.firstPage();
+  do {
+    // Header
+    u8g2.setFont(u8g2_font_helvB08_tr); 
+    u8g2.drawBox(0, 0, 128, 12);
+    u8g2.setDrawColor(0);
+    u8g2.setCursor(2, 10);
+    u8g2.print("NTAG WRITER");
+    
+    // Body
+    u8g2.setDrawColor(1);
+    u8g2.setFont(u8g2_font_profont12_tf); 
+    u8g2.setCursor(0, 30); u8g2.print(line1);
+    u8g2.setCursor(0, 45); u8g2.print(line2);
+  } while ( u8g2.nextPage() );
+}
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(STATUS_LED, OUTPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+
+  // 1. Init Screen
+  recoverI2C();
+  u8g2.begin();
+  u8g2.setContrast(255);
+  updateScreen("Booting...", "Resetting Bus");
+
+  // 2. Init NFC
+  pinMode(PN532_RESET, OUTPUT);
+  digitalWrite(PN532_RESET, LOW); delay(100);
+  digitalWrite(PN532_RESET, HIGH); delay(200);
+
+  nfc.begin();
+  uint32_t version = nfc.getFirmwareVersion();
+  if (!version) {
+    updateScreen("ERROR", "No PN532 Found");
+    while(1) { tone(BUZZER_PIN, 200, 200); delay(200); }
+  }
+  
+ 
+  nfc.SAMConfig();
+
+  updateScreen("READY", "Place Card...");
+  tone(BUZZER_PIN, 2000, 100); delay(100); tone(BUZZER_PIN, 2500, 100);
+}
+
+void loop() {
+  uint8_t uid[7];
+  uint8_t uidLength;
+
+  // 1. Wait for Card
+  if (nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength)) {
+    
+    // Card Found
+    tone(BUZZER_PIN, 1000, 50);
+    updateScreen("WRITING...", "Do Not Move!");
+    digitalWrite(STATUS_LED, HIGH);
+
+    bool success = true;
+    int bytesWritten = 0;
+    int currentPage = 4; // User Memory starts at Page 4
+
+    // 2. Write Loop
+    while (bytesWritten < PACKET_SIZE) {
+      uint8_t pageBuffer[4] = {0,0,0,0};
+      for(int i=0; i<4; i++) {
+        if(bytesWritten < PACKET_SIZE) pageBuffer[i] = dummyData[bytesWritten++];
+      }
+      
+      // Use Ultralight Write
+      if (!nfc.mifareultralight_WritePage(currentPage, pageBuffer)) {
+        success = false; break;
+      }
+      currentPage++;
+      delay(10); // Small delay for NTAG EEPROM
+    }
+
+    // 3. Verify Loop
+    if(success) {
+      updateScreen("VERIFYING...", "Checking Data");
+      int bytesVerified = 0;
+      int verifyPage = 4;
+      
+      while(bytesVerified < PACKET_SIZE && success) {
+        uint8_t readBuf[32];
+        if(nfc.mifareultralight_ReadPage(verifyPage, readBuf)) {
+          for(int k=0; k<4 && bytesVerified < PACKET_SIZE; k++) {
+             if(readBuf[k] != dummyData[bytesVerified]) success = false;
+             bytesVerified++;
+          }
+        } else success = false;
+        verifyPage++;
+      }
+    }
+
+    digitalWrite(STATUS_LED, LOW);
+
+    // 4. Result Display
+    if (success) {
+      // Big Checkmark Logic or Text (Requires Page Loop now)
+      u8g2.firstPage();
+      do {
+        u8g2.setFont(u8g2_font_helvB14_tr);
+        u8g2.drawStr(10, 40, "SUCCESS!");
+        u8g2.setFont(u8g2_font_profont12_tf);
+        u8g2.drawStr(20, 60, "Data Written");
+      } while ( u8g2.nextPage() );
+      
+      Serial.println("Write OK");
+      tone(BUZZER_PIN, 1000, 100); delay(120);
+      tone(BUZZER_PIN, 2000, 200);
+    } else {
+      updateScreen("FAILED!", "Try Again");
+      Serial.println("Write Fail");
+      tone(BUZZER_PIN, 200, 500);
+    }
+    
+    delay(3000); // Wait before next scan
+    updateScreen("READY", "Place Card...");
+  }
+}
