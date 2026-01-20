@@ -16,6 +16,35 @@
     </style>
 </head>
 <body class="h-screen flex flex-col items-center justify-center p-6">
+        <!-- === NEW: TOP BANNER & PULSE INDICATOR === -->
+    <header class="w-full max-w-6xl mb-6 flex justify-between items-center">
+        <div class="flex items-center gap-3">
+            <!-- Logo Block -->
+            <div class="w-12 h-12 bg-slate-900 rounded-lg flex items-center justify-center shadow-lg transform transition hover:scale-105">
+                <span class="text-white font-bold text-2xl">S</span>
+            </div>
+            <div>
+                <h1 class="text-2xl font-bold text-slate-800 tracking-tight">SAVOX-OTOS <span class="text-slate-400">INTERFACE</span></h1>
+                <p class="text-xs text-slate-500 font-mono tracking-widest uppercase">Tactical Audio Encoding System</p>
+            </div>
+        </div>
+        
+        <!-- Status Indicator -->
+        <div class="text-right hidden md:block">
+            <p class="text-sm font-bold text-slate-700">Acoustician Terminal</p>
+            <div class="flex items-center gap-2 justify-end mt-1">
+                <!-- The Pulse Animation -->
+                <span class="relative flex h-2 w-2">
+                  <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
+                  <span class="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
+                </span>
+                <p class="text-xs text-slate-500">Secure Environment</p>
+            </div>
+        </div>
+    </header>
+    <!-- ========================================= -->
+
+    <!-- MAIN INTERFACE CARD -->
 
     <div class="bg-white shadow-xl rounded-2xl w-full max-w-6xl overflow-hidden flex flex-col md:flex-row h-[85vh]">
         
