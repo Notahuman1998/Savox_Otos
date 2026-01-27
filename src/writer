@@ -1,0 +1,265 @@
+#include <Wire.h>
+#include <SPI.h>
+#include <Adafruit_PN532.h>
+#include <U8g2lib.h>
+
+// --- DISPLAY CONFIGURATION (VMA438 / SSD1306) ---
+// Low memory mode (_1_) to fit on Nano
+U8G2_SSD1306_128X64_NONAME_1_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
+
+// --- HARDWARE CONFIGURATION ---
+#define PN532_IRQ   2
+#define PN532_RESET 3
+#define BUZZER_PIN  A2
+#define STATUS_LED  13
+
+Adafruit_PN532 nfc(PN532_IRQ, PN532_RESET);
+
+// --- DATA BUFFERS ---
+const int PACKET_SIZE = 22; 
+uint8_t buffer[PACKET_SIZE]; 
+
+// --- I2C RECOVERY ---
+void recoverI2C() {
+  Wire.end(); delay(10);
+  pinMode(A4, OUTPUT); pinMode(A5, OUTPUT);
+  digitalWrite(A4, HIGH);
+  for (int i = 0; i < 9; i++) {
+    digitalWrite(A5, HIGH); delayMicroseconds(10);
+    digitalWrite(A5, LOW); delayMicroseconds(10);
+  }
+  digitalWrite(A4, LOW); digitalWrite(A5, HIGH); delayMicroseconds(10);
+  digitalWrite(A4, HIGH); delayMicroseconds(10);
+  pinMode(A4, INPUT); pinMode(A5, INPUT); delay(100);
+}
+
+// Helper: Screen Update
+void updateScreen(const char* line1, const char* line2 = "", const char* line3 = "") {
+  u8g2.firstPage();
+  do {
+    // Header
+    u8g2.setFont(u8g2_font_helvB08_tr); 
+    u8g2.drawBox(0, 0, 128, 12);
+    u8g2.setDrawColor(0);
+    u8g2.setCursor(2, 10);
+    u8g2.print("SAVOX WRITER");
+    
+    // Body
+    u8g2.setDrawColor(1);
+    u8g2.setFont(u8g2_font_profont12_tf); 
+    u8g2.setCursor(0, 28); u8g2.print(line1);
+    u8g2.setCursor(0, 40); u8g2.print(line2);
+    u8g2.setCursor(0, 52); u8g2.print(line3);
+  } while ( u8g2.nextPage() );
+}
+
+// --- INITIALIZATION ---
+bool initPN532() {
+  recoverI2C();
+  pinMode(PN532_RESET, OUTPUT);
+  digitalWrite(PN532_RESET, LOW); delay(100);
+  digitalWrite(PN532_RESET, HIGH); delay(200);
+  
+  Wire.begin();
+  delay(100);
+  nfc.begin();
+  delay(200);
+  
+  for (int i = 0; i < 3; i++) {
+    if (nfc.getFirmwareVersion()) {
+      nfc.SAMConfig();
+      return true;
+    }
+    delay(200);
+  }
+  return false;
+}
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(STATUS_LED, OUTPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+
+  // 1. Init Screen
+  recoverI2C();
+  u8g2.begin();
+  u8g2.setContrast(255);
+  updateScreen("Booting...", "Init NFC System");
+
+  delay(500);
+
+  // 2. Init NFC
+  if (!initPN532()) {
+    updateScreen("BOOT ERROR", "PN532 Not Found", "Check Wiring");
+    Serial.println("ERROR: PN532 Init Failed!");
+    while(1) { tone(BUZZER_PIN, 200, 200); delay(200); }
+  }
+  
+  updateScreen("SYSTEM READY", "Waiting for PC...", "Open Website");
+  Serial.println("DEBUG: PN532 Online");
+  tone(BUZZER_PIN, 2000, 100); delay(100); tone(BUZZER_PIN, 2500, 100);
+}
+
+void loop() {
+  // Listen for Web Serial Commands
+  if (Serial.available() > 0) {
+    char cmd = Serial.read();
+    
+    if (cmd == 'W') {
+      handleWriteCommand();
+    }
+    else if (cmd == 'S') {
+      handleStatusCheck();
+    }
+  }
+}
+
+void handleStatusCheck() {
+  updateScreen("SELF TEST", "Checking...", "");
+  uint32_t version = nfc.getFirmwareVersion();
+  
+  if (version) {
+    Serial.println("DEBUG: System OK");
+    updateScreen("SELF TEST", "Result: OK", "Ready.");
+    tone(BUZZER_PIN, 1500, 50);
+  } else {
+    Serial.println("ERROR: PN532 not responding");
+    updateScreen("SELF TEST", "Result: FAIL", "Chip Offline");
+    tone(BUZZER_PIN, 200, 500);
+  }
+  
+  delay(1000);
+  updateScreen("SYSTEM READY", "Waiting for PC...", "");
+  Serial.flush();
+}
+
+void handleWriteCommand() {
+  Serial.println("DEBUG: Write command received");
+  updateScreen("RECEIVING DATA", "Please Wait...", "");
+  
+  // 1. Receive Data
+  unsigned long startTime = millis();
+  while (Serial.available() < PACKET_SIZE) {
+    if (millis() - startTime > 3000) {
+      Serial.println("ERROR: Timeout waiting for data");
+      updateScreen("PC ERROR", "Timeout", "No Data");
+      tone(BUZZER_PIN, 200, 500);
+      Serial.flush();
+      delay(2000);
+      updateScreen("SYSTEM READY", "Waiting for PC...", "");
+      return;
+    }
+  }
+  
+  // Read into buffer
+  for (int i = 0; i < PACKET_SIZE; i++) {
+    buffer[i] = Serial.read();
+  }
+  
+  // 2. Wait for Card
+  Serial.println("DEBUG: Data received. Waiting for card...");
+  updateScreen("DATA RECEIVED", "Place Card", "Scanning...");
+  tone(BUZZER_PIN, 1000, 100);
+  digitalWrite(STATUS_LED, HIGH);
+  
+  bool cardFound = false;
+  uint8_t uid[7];
+  uint8_t uidLength;
+  unsigned long searchStart = millis();
+  
+  while (millis() - searchStart < 10000) {
+    if (nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength, 100)) {
+      cardFound = true;
+      break;
+    }
+    // Heartbeat tick
+    if ((millis() - searchStart) % 2000 < 100) tone(BUZZER_PIN, 800, 50);
+  }
+  
+  if (!cardFound) {
+    Serial.println("ERROR: No card detected");
+    updateScreen("TIMEOUT", "No Card Found", "Try Again");
+    tone(BUZZER_PIN, 200, 800);
+    digitalWrite(STATUS_LED, LOW);
+    delay(2000);
+    updateScreen("SYSTEM READY", "Waiting for PC...", "");
+    return;
+  }
+  
+  // 3. Write Process
+  tone(BUZZER_PIN, 1500, 100);
+  updateScreen("WRITING...", "Do Not Move", "Card!");
+  
+  Serial.println("DEBUG: Writing...");
+  bool allSuccess = true;
+  int bytesWritten = 0;
+  int currentPage = 4; // Start at Page 4
+  
+  while (bytesWritten < PACKET_SIZE && allSuccess) {
+    uint8_t pageBuffer[4] = {0,0,0,0};
+    for (int j = 0; j < 4; j++) {
+      if (bytesWritten < PACKET_SIZE) pageBuffer[j] = buffer[bytesWritten++];
+    }
+    
+    if (!nfc.mifareultralight_WritePage(currentPage, pageBuffer)) {
+      Serial.print("ERROR: Write failed page "); Serial.println(currentPage);
+      allSuccess = false;
+    }
+    currentPage++;
+    delay(15); // NTAG delay
+  }
+  
+  // 4. Verify Process
+  if (allSuccess) {
+    updateScreen("VERIFYING...", "Checking Data", "");
+    Serial.println("DEBUG: Verifying...");
+    int bytesVerified = 0;
+    int verifyPage = 4;
+    
+    while (bytesVerified < PACKET_SIZE && allSuccess) {
+      uint8_t readBuf[32];
+      if (nfc.mifareultralight_ReadPage(verifyPage, readBuf)) {
+        for (int k = 0; k < 4 && bytesVerified < PACKET_SIZE; k++) {
+          if (readBuf[k] != buffer[bytesVerified]) {
+            Serial.println("ERROR: Mismatch");
+            allSuccess = false;
+            break;
+          }
+          bytesVerified++;
+        }
+      } else {
+        allSuccess = false;
+      }
+      verifyPage++;
+    }
+  }
+  
+  digitalWrite(STATUS_LED, LOW);
+  
+  // 5. Final Result
+  if (allSuccess) {
+    Serial.println("SUCCESS: Profile Written");
+    
+    // Screen: SUCCESS Message
+    u8g2.firstPage();
+    do {
+      u8g2.setFont(u8g2_font_helvB14_tr);
+      u8g2.drawStr(10, 40, "SUCCESS!");
+      u8g2.setFont(u8g2_font_profont12_tf);
+      u8g2.drawStr(20, 60, "Profile Saved");
+    } while ( u8g2.nextPage() );
+    
+    tone(BUZZER_PIN, 1000, 100); delay(120);
+    tone(BUZZER_PIN, 1500, 100); delay(120);
+    tone(BUZZER_PIN, 2000, 200);
+  } else {
+    Serial.println("ERROR: Operation failed");
+    updateScreen("WRITE FAILED", "Card Moved?", "Try Again");
+    tone(BUZZER_PIN, 500, 300); delay(350);
+    tone(BUZZER_PIN, 200, 500);
+  }
+  
+  Serial.flush();
+  delay(3000);
+  updateScreen("SYSTEM READY", "Waiting for PC...", "");
+}
