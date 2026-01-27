@@ -1,0 +1,215 @@
+Is that code and this code similiar
+
+#include <Wire.h>
+#include <Adafruit_PN532.h>
+#include <SPI.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_PCD8544.h>
+
+// --- Pin Definitions for Teensy 3.2 & Nokia 5110 ---
+// --- Pin Definitions for Teensy 3.2 & Nokia 5110 ---
+const int CLK_PIN  = 2;
+const int DIN_PIN  = 3;
+const int DC_PIN   = 4;
+const int CE_PIN   = 5;
+const int RST_PIN  = 8;
+
+Adafruit_PCD8544 display = Adafruit_PCD8544(CLK_PIN, DIN_PIN, DC_PIN, CE_PIN, RST_PIN);
+
+#define PN532_IRQ   -1
+#define PN532_RESET -1
+Adafruit_PN532 nfc(PN532_IRQ, PN532_RESET);
+
+// ========== FREQUENCY CONSTANTS ==========
+// These are HARDCODED and known to both writer and reader
+const uint16_t FREQUENCIES[11] = {125, 250, 500, 750, 1000, 1500, 2000, 3000, 4000, 6000, 8000};
+// =========================================
+
+void showSequenceOnScreen(uint8_t* thresholds, bool isRightEar) {
+    int startOffset = 0;
+    String title = "LEFT EAR";
+
+    if (isRightEar) {
+       startOffset = 11; // Right ear thresholds start at byte 11
+       title = "RIGHT EAR";
+    }
+
+    // Loop through 11 points
+    for (int i = 0; i < 11; i++) {
+        // Read threshold value (signed 8-bit integer)
+        int8_t threshold = (int8_t)thresholds[startOffset + i];
+        
+        // Get frequency from constant array
+        uint16_t freq = FREQUENCIES[i];
+
+        display.clearDisplay();
+        display.setCursor(0,0);
+
+        // Header
+        display.setTextColor(WHITE, BLACK); 
+        display.println(title);
+        display.setTextColor(BLACK, WHITE);
+
+        // Point info
+        display.print("Point "); display.print(i + 1); display.println("/11");
+        display.drawLine(0, 17, 84, 17, BLACK);
+        display.setCursor(0, 20);
+
+        // Display data
+        display.print("Freq: "); display.print(freq); display.println(" Hz");
+        display.println(""); 
+        display.print("TH:   "); display.print(threshold); display.println(" dB");
+
+        display.display();
+        delay(1500); 
+    }
+}
+
+void setup() {
+  //Serial.begin(115200); // Uncomment for debugging
+  pinMode(3, OUTPUT); // Waiting LED
+  pinMode(4, OUTPUT); // Success LED
+  
+  digitalWrite(3, LOW);
+  digitalWrite(4, LOW);
+  
+  Wire.begin();
+
+  display.begin();
+  display.setContrast(60);
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(BLACK);
+  display.setCursor(0,0);
+  display.println("Init NFC...");
+  display.display();
+
+  nfc.begin();
+
+  uint32_t versiondata = nfc.getFirmwareVersion();
+  if (!versiondata) {
+    display.clearDisplay();
+    display.println("NFC Fail!");
+    display.println("Check Wiring");
+    display.display();
+    while (1);
+  }
+
+  nfc.SAMConfig();
+
+  display.clearDisplay();
+  display.setCursor(0,0);
+  display.println("READY.");
+  display.println("Scan NTAG");
+  display.println("card...");
+  display.display();
+}
+
+void loop() {
+  digitalWrite(4, LOW);
+  digitalWrite(3, HIGH);
+
+  uint8_t uid[7];
+  uint8_t uidLength;
+
+  if (nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength)) {
+    digitalWrite(3, LOW);
+
+    display.clearDisplay();
+    display.setCursor(0,0);
+    display.println("Reading");
+    display.println("NTAG data...");
+    display.display();
+
+    delay(200);
+
+    // ========== DATA SIZE: 22 BYTES ==========
+    // 11 thresholds left + 11 thresholds right = 22 bytes
+    const int totalBytes = 22;
+    uint8_t profiledata[totalBytes];
+    // =========================================
+
+    // Clear buffer to prevent ghost data
+    memset(profiledata, 0, sizeof(profiledata));
+    
+    int dataIndex = 0;
+    bool readFailed = false;
+
+    // Read 22 bytes from NTAG203 (6 pages: 4-9)
+    // 22 bytes / 4 bytes per page = 5.5 pages, round up to 6
+    for (int page = 4; page < 10; page++) {
+      uint8_t pageData[4];
+      
+      if (nfc.mifareultralight_ReadPage(page, pageData)) {
+        for (int i = 0; i < 4; i++) {
+          if (dataIndex < totalBytes) {
+            profiledata[dataIndex++] = pageData[i];
+          }
+        }
+      } else {
+        readFailed = true;
+        display.clearDisplay();
+        display.println("Read Failed!");
+        display.print("Error pg: ");
+        display.println(page);
+        display.display();
+        delay(2000);
+        break;
+      }
+    }
+
+    if (readFailed) {
+      display.clearDisplay();
+      display.println("Read Failed!");
+      display.println("Try again.");
+      display.display();
+      delay(2000);
+    } else {
+      // SUCCESS!
+      digitalWrite(4, HIGH);
+
+      display.clearDisplay();
+      display.println("Read OK!");
+      display.println("Starting");
+      display.println("display...");
+      display.display();
+      delay(1000);
+
+      // Show left ear (11 points)
+      showSequenceOnScreen(profiledata, false);
+
+      display.clearDisplay(); 
+      display.setCursor(0,0);
+      display.println("---");
+      display.display(); 
+      delay(800); 
+
+      // Show right ear (11 points)
+      showSequenceOnScreen(profiledata, true);
+
+      display.clearDisplay();
+      display.setCursor(0,0);
+      display.println("Done!");
+      display.println("");
+      display.println("Remove card");
+      display.println("to scan next");
+      display.display();
+      
+      delay(2000);
+    }
+
+    // Wait for card removal (ghost prevention)
+    while (nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength, 100)) {
+      delay(100);
+    }
+    
+    delay(500);
+    
+    display.clearDisplay();
+    display.setCursor(0,0);
+    display.println("READY.");
+    display.println("Scan NTAG");
+    display.println("card...");
+    display.display();
+  }
+}
