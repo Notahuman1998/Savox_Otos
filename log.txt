@@ -1,0 +1,6 @@
+27/1/2026
+1. Currently, Otos needs to have a NFC device to read hearing profile then writes the data into writer then NFC cards. we need to create MOBILE APP instead so 
+if user lost their cards they can still use another cards or even mobile phone to touch on the NFC reader.
+2. NFC funcionality works fine now, need to test NFC FROM PHONE'S APP TO CARDS.
+3. Device can output the audio but the ALGORITHMS still NOT WORK yet due to NON-UNDERSTANDING ABOUT ALGORIRTHMS such as what I need to do, what factors we need 
+to improve, what our solutions are, how?
